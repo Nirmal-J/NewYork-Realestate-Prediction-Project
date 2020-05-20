@@ -1,0 +1,495 @@
+---
+title: "New-York City Real-Estate Price Predictor"
+author: "Nirmal Sai Swaroop Janapaneedi"
+date: "20/05/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this project I will create a price prediction algorithm for New-York City real-estate prices for the final project of the course HarvardX: PH125.9x - Data Science: Capstone. 
+The algorithm is trained based on New-York city property sales, imported from kaggle website. The method chosen for training the algorithm is random forest.  
+The data for the analysis was downloaded from the [kaggle website](https://www.kaggle.com/new-york-city/nyc-property-sales). 
+The dataset is a record of every building or building unit (apartment, etc.) sold in the New York City property market over a 12-month period. The data contains transactions made starting on September 1st, 2016 and finishing on August 31, 2017.
+The first section will explore and describe the data; The Methods&Analysis section will study the algorithm used, training it on the train set; the Results section will test the algorithm on the test set and the conclusions part will discuss the results and suggest further analysis. 
+
+
+```{r, include = FALSE}
+set.seed(2020)
+
+if(!require(groupdata2)) install.packages("groupdata2", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(stringr)) install.packages("stringr", repos = "http://cran.us.r-project.org")
+if(!require(recommenderlab)) install.packages("recommenderlab", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+if(!require(tinytex)) install.packages("tinytex", repos = "http://cran.us.r-project.org")
+if(!require(readr)) install.packages("readr", repos = "http://cran.us.r-project.org")
+if(!require(reshape2)) install.packages("reshape2", repos = "http://cran.us.r-project.org")
+if(!require(ggcorrplot)) install.packages("ggcorplot", repos = "http://cran.us.r-project.org")
+if(!require(ranger)) install.packages("ranger", repos = "http://cran.us.r-project.org")
+tinytex::tlmgr_install("pdfcrop")
+
+
+options(digits = 4, scipen = 999)
+
+
+### NYC property sales
+### https://www.kaggle.com/new-york-city/nyc-property-sales
+### https://www.kaggle.com/new-york-city/nyc-property-sales/download
+
+### reading the data from the git repository - where I have downloaded it
+prices <- read_csv(url("https://raw.githubusercontent.com/AmiDavid/NYC-real-esate-prices-algorithm/master/nyc-rolling-sales.csv"))
+
+
+#### golssary of terms https://www1.nyc.gov/assets/finance/downloads/pdf/07pdf/glossary_rsf071607.pdf
+```
+
+
+
+## Exploring the data
+
+The data contains the information about 84,548 real-estate transactions made in New-York City starting on September 1st, 2016 and finishing on August 31, 2017.
+
+```{r}
+print((head(prices)))
+```
+
+The different variables are:
+```{r, include = TRUE}
+### the different variables
+colnames(prices)
+```
+
+The [glossary of terms](https://www1.nyc.gov/assets/finance/downloads/pdf/07pdf/glossary_rsf071607.pdf) describes the meaning of each one of the variables.
+
+Some basic exploration of the data shows that the sale price of some of the transactions is lower than \$1,000. This might be due inheritence, non-monetary exchange, etc. I have filtered the transactions with a sale price lower than \$1,000 for a more presice analysis.  
+
+```{r}
+### some houses are sold for 0, 1, 10 or NA.
+prices %>% 
+  dplyr::count(prices$`SALE PRICE` < 1000)
+
+```
+
+```{r, include=FALSE}
+#### I removed the houses sold for less than 1000 and the NA's
+prices <- prices %>% 
+  dplyr::filter(prices$`SALE PRICE` > 1000)
+
+```
+
+A log transformation of the sale price shows a somewhat normal distribution of the sale prices. 
+
+```{r}
+### we can see the log(prices distribution)
+prices %>% ggplot(aes(log(as.numeric(`SALE PRICE`)))) +
+  geom_histogram(bins = 25, fill = "blue", color = "black") +
+  xlab("log(Sale Price)")
+
+
+```
+
+I will return to the sale price later for further analysis, but first, let's examine the other variables.
+The data includes the Building Class Category. The building class category, explained by the glossary of terms as a field used to describe the property's broad usage.
+
+```{r}
+#### checking the building class category
+
+prices %>% 
+  group_by(`BUILDING CLASS CATEGORY`) %>% 
+  summarize(n = n())
+```
+
+The data contains information about the neighberhood of the property. Some neighborhoods have more transactions than others.
+
+```{r}
+#### grouping the neighberhood
+prices %>% 
+  ggplot(aes(NEIGHBORHOOD)) +
+  geom_bar()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r, fig.cap="10 Neighberhoods with the most sales" }
+#### the neighberhoods with the most sales
+prices %>% 
+  group_by(NEIGHBORHOOD) %>% 
+  summarize(n = n(), mean_sale_price = mean(as.numeric(`SALE PRICE`)/ 1000)) %>% 
+  arrange(desc(n)) %>% 
+  head(n = 10)
+
+```
+
+
+Every property in the city is assigned to one of four tax classes, with tax class 1 and 2 including residential properties, 3 property with equipment owned by gas, telephone or electric companies and 4 all other properties (offices, factories, warehouses, garage buildings, etc.).
+
+```{r}
+### the tax class 
+prices %>% 
+  group_by(prices$`TAX CLASS AT TIME OF SALE`) %>% 
+  summarize(mean_sale_price = mean(as.numeric(`SALE PRICE`) / 1000), n = n())
+
+```
+We can see that the majority of properties sold are in class 1 and 2. The mean sale price is much higher for tax class 4 properties.
+
+```{r}
+### plotting the tax class
+prices %>% 
+  group_by(prices$`TAX CLASS AT TIME OF SALE`) %>% 
+  ggplot(aes(`TAX CLASS AT TIME OF SALE`, fill = `TAX CLASS AT TIME OF SALE`)) + 
+  geom_bar(color = "black")
+
+```
+
+We can see that also among the tax classes at present, there is some variance and some extra information on the different tax classes.
+
+```{r}
+### showing building class and price
+prices %>% 
+  ggplot(aes(prices$`TAX CLASS AT PRESENT`, as.numeric(prices$`SALE PRICE`))) +
+  geom_boxplot() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_y_continuous(trans = "log2") +
+  xlab("Tax class at present") +
+  ylab("price sold")
+
+
+```
+
+The data includes information about the gross square feet of the property. The gross square feet is not included for all the properties. Filtering the NA's, shows some connection between sale price and the size of the property. 
+```{r}
+### showing connection between size and price
+
+prices %>% 
+  filter((prices$'GROSS SQUARE FEET') > 0) %>% 
+  ggplot(aes(as.numeric(`GROSS SQUARE FEET`), as.numeric(`SALE PRICE`))) +
+  geom_point()+
+  scale_y_continuous(trans = "log2") +
+  scale_x_continuous(trans = "log2") + 
+  xlab("Gross Square FEET") +
+  ylab("Price Sold")
+
+
+```
+
+Adding the tax class to the graph shows that tax class adds some more information:
+```{r}
+### showing connection between size and price coloring the tax class at moment of sale
+
+prices %>% 
+  filter((prices$'GROSS SQUARE FEET') > 0) %>% 
+  ggplot(aes(as.numeric(`GROSS SQUARE FEET`), as.numeric(`SALE PRICE`), color = `TAX CLASS AT TIME OF SALE`)) +
+  geom_point()+
+  scale_y_continuous(trans = "log2") +
+  scale_x_continuous(trans = "log2") +
+  xlab("Gross Square FEET") +
+  ylab("Price Sold") + 
+  labs(fill = "Tax Class") + 
+  theme(legend.position="bottom")
+
+
+```
+
+The data also includes information about the construction year of the property. We can see that for some of the years constructed there were more transcations in the data.
+```{r}
+### year built of the building
+prices %>% 
+  filter(prices$`YEAR BUILT` > 0) %>% 
+  ggplot(aes(as.numeric(`YEAR BUILT`))) +
+  geom_bar() + 
+  xlim(1825, max(as.numeric(prices$`YEAR BUILT`)))+
+  xlab("Year Built")
+
+```
+We can also see some possible connection between the construction year and the mean sale price.
+
+```{r}
+
+### connection between the year built and the average price
+prices %>% 
+  group_by(`YEAR BUILT`) %>% 
+  filter(`YEAR BUILT` > 1800) %>% 
+  summarize(mean_sale_price = mean(as.numeric(`SALE PRICE`) / 1000), n = n()) %>%
+  head(n = 10)
+
+```
+
+```{r}
+prices %>% 
+  group_by(`YEAR BUILT`) %>% 
+  filter(`YEAR BUILT` > 1800) %>% 
+  summarize(mean_sale_price = mean(as.numeric(`SALE PRICE`) / 1000), n = n()) %>% 
+  ggplot(aes(`YEAR BUILT`, mean_sale_price)) +
+  geom_point()+
+  xlab("Year Built") +
+  ylab("Mean Sale Price")
+
+```
+
+The city of New-York is divided into five boroughs: Manhattan, Brooklyn, Queens, The Bronx and Staten Island. The data includes the borough information. 
+```{r}
+### 5 boroughs of NYC: Manhattan, Brooklyn, Queens, The Bronx and Staten Island
+
+prices %>% 
+  mutate(BOROUGH = ifelse(BOROUGH == 1, "Manhattan", 
+                          ifelse(BOROUGH == 2, "Brooklyn",
+                                 ifelse(BOROUGH == 3, "Queens", 
+                                        ifelse(BOROUGH == 4, "The Bronx", "Staten Island"))))) %>% 
+  
+  group_by(`BOROUGH`) %>% 
+  summarize(mean_sale_price = mean(as.numeric(`SALE PRICE`) / 1000), n = n())
+
+
+```
+
+```{r}
+### bourugh info
+prices %>% 
+  ggplot(aes(as.factor(prices$BOROUGH), as.numeric(prices$`SALE PRICE`))) +
+  geom_boxplot() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_y_continuous(trans = "log2") +
+  xlab("Borough") +
+  ylab("log2(price sold)") +
+  scale_x_discrete(labels = c("Manhattan", "Brooklyn", "Queens", "The Bronx", "Staten Island")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+```
+
+We can see that The Bronx had the most transactions, yet Manhattan had the highest mean sale price.
+
+```{r}
+### plotting the boroughs
+prices %>% 
+  mutate(BOROUGH = ifelse(BOROUGH == 1, "Manhattan", 
+                          ifelse(BOROUGH == 2, "Brooklyn",
+                                 ifelse(BOROUGH == 3, "Queens", 
+                                        ifelse(BOROUGH == 4, "The Bronx",
+                                               ifelse(BOROUGH == 5, "Staten Island", 0)))))) %>% 
+  group_by(prices$BOROUGH) %>% 
+  ggplot(aes(BOROUGH, fill = as.factor(`BOROUGH`))) +
+  geom_bar(color = "black") +
+  ylab("Number of sales")+ 
+  labs(fill = "Borough:") + 
+  theme(legend.position="bottom")
+
+
+```
+
+The date of the sale is also included in the data and might be correlated with the price. Grouping the sales by weeks, we can see that some weeks had more transactions than others.
+
+```{r}
+### some weeks have more deals than others
+
+prices %>% 
+  mutate(`SALE DATE` = as_datetime(`SALE DATE`),
+         `SALE DATE` = round_date(`SALE DATE`, unit = "week",
+                                  week_start = getOption("lubridate.week.start", 7))) %>% 
+  group_by(`SALE DATE`) %>% 
+  ggplot(aes(`SALE DATE`)) +
+  geom_bar() +
+  ylab("Number of Sales")
+
+
+```
+
+I have tidied the data, changing the the variable names and coercing some of them to numerical and factor variables for further analysis. 
+
+```{r}
+### tidying the data
+prices <- prices %>% 
+  mutate(neighborhood = as.factor(prices$NEIGHBORHOOD), building_class_at_time_of_sale = as.factor(prices$`BUILDING CLASS AT TIME OF SALE`),
+         tax_class_at_time_of_sale = as.factor(prices$`TAX CLASS AT TIME OF SALE`), year_built = as.numeric(prices$`YEAR BUILT`),
+         gross_sf = as.numeric(prices$`GROSS SQUARE FEET`), land_sf = as.numeric(prices$`LAND SQUARE FEET`),
+         total_units = as.numeric(prices$`TOTAL UNITS`), commercial_units = as.numeric(prices$`COMMERCIAL UNITS`),
+         residential_units = as.numeric(prices$`RESIDENTIAL UNITS`),
+         zip_code = as.numeric(prices$`ZIP CODE`), apartment_number = as.factor(prices$`APARTMENT NUMBER`),
+         lot = as.numeric(prices$LOT), borough = as.factor(prices$BOROUGH), building_class_category = as.factor(prices$`BUILDING CLASS CATEGORY`),
+         tax_class_at_present = as.factor(prices$`TAX CLASS AT PRESENT`), block = as.numeric(prices$BLOCK),
+         building_class_at_present = as.factor(prices$`BUILDING CLASS AT PRESENT`), address = as.factor(prices$ADDRESS),
+         sale_date = as_datetime(prices$`SALE DATE`), sale_date = round_date(prices$`SALE DATE`, unit = "week",
+                                                                             week_start = getOption("lubridate.week.start", 7)),
+         sale_price_in_thousands = as.numeric(`SALE PRICE`) / 1000,  
+         sale_price = as.numeric(prices$`SALE PRICE`)) %>% 
+  select(-`SALE PRICE`, -`BUILDING CLASS AT TIME OF SALE`, -`TAX CLASS AT TIME OF SALE`, -`YEAR BUILT`,
+         -`GROSS SQUARE FEET`, -`LAND SQUARE FEET`, -`TOTAL UNITS`, -`COMMERCIAL UNITS`, -`RESIDENTIAL UNITS`,
+         -`ZIP CODE`, -`APARTMENT NUMBER`, -LOT, -BOROUGH, -`BUILDING CLASS CATEGORY`,
+         -`TAX CLASS AT PRESENT`, -BLOCK, -`BUILDING CLASS AT PRESENT`, -ADDRESS, 
+         -`SALE DATE`, -NEIGHBORHOOD, -`EASE-MENT`, -X1)
+
+
+
+```
+
+# Methods and Analysis
+
+## Data Preparation
+
+The first method which I have attempted was a general linear model, using the caret package. The computing time for that model and other models on the caret package was often longer than 12h and did not provide a satisfying prediction. I have therefore, divided the data into categories, with the intention of predicting the price category of the property. I have attempted several different category borders, eventually using \$50,000 as the group size. The observations have been divided into equal sized borders with \$1,000 being the lowest limit, and the last group includes all values above \$10,000,000.
+
+
+```{r}
+### Dividing the prices into categories of 10000$
+
+prices$sale_price_category <- 
+  as.factor(cut(prices$sale_price, breaks = c(seq(1000, 10000000, 50000), Inf), dig.lab = 50))
+
+prices %>% 
+  group_by(sale_price_category) %>% 
+  filter(!is.na(sale_price_category)) %>% 
+  summarize(n = n()) %>% 
+  head(n = 10)
+
+
+```
+
+We see that the sale price categories distribution follows a somewhat right tail x distribution, with an extremely large group for value prices of \$9,950,000 to \$10,000,000.
+
+```{r}
+prices %>% 
+  ggplot(aes((sale_price_category))) +
+  stat_count(width = 0.5) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+```
+
+Before going into training the algorithm, I examined the correlataions between the different varaibles and have removed variables with very high correlation (close to 1). A heatmap of the correlations between the different variables shows that some variables are more correlated to the sale price category than others. I have omitted the na's from the correlation calculation.
+
+```{r}
+
+### Creating a correlation matrix - by the explanations in http://www.sthda.com/english/wiki/ggplot2-quick-correlation-matrix-heatmap-r-software-and-data-visualization
+### And https://towardsdatascience.com/how-to-create-a-correlation-matrix-with-too-many-variables-309cc0c0a57
+
+
+
+corr_simple <- function(data=prices,sig=0.5){
+  #convert data to numeric in order to run correlations
+  #convert to factor first to keep the integrity of the data - each value will become a number rather than turn into NA
+  df_cor <- data %>% mutate_if(is.character, as.factor)
+  df_cor <- df_cor %>% mutate_if(is.factor, as.numeric)
+}
+
+prices_numerical <- corr_simple(prices)
+prices_numerical$sale_date <- as.numeric(prices_numerical$sale_date)
+
+
+cormat <- round(cor(prices_numerical, use = "na.or.complete"), 2)
+ggcorrplot(cormat)
+
+```
+
+We can see that some of the variables have NA's. 
+```{r}
+### We see that some columns have some NA's
+colSums(is.na(prices))
+
+```
+
+## Random Forest Algorithm
+As I mentioned, my first attempts of creating an algorithm included using the train function in the [caret package](https://cran.r-project.org/web/packages/caret/caret.pdf). Using my dual-core 16GB laptop took well over 15 hours and therefore I have looked for different options, eventually using the [ranger](https://cran.r-project.org/web/packages/ranger/ranger.pdf) for implementing a random forest algorithm. The ranger package manual describes the package as "A fast implementation of Random Forests", and indeed, computing time has improved drastically.
+I divided the data into train and test sets, trained the algorithm on the train set and tested it on the test, reporting the evaluation metrics described in the following section. I have also filtered some na colomns (correlated variables).
+
+```{r}
+### creating test set from the prices_set
+test_index <- createDataPartition(y = prices$borough, times = 1, p = 0.1, list = FALSE)
+test_set <- prices[test_index,]
+train_set <- prices[-test_index,]
+
+### filtering na columns
+train_set <- train_set %>%
+  filter(!is.na(sale_price_category) & gross_sf > 0 & land_sf > 0 & !is.na(tax_class_at_present) & !is.na(building_class_at_present)) %>% 
+  select(-apartment_number)
+
+test_set <- test_set %>%
+  filter(!is.na(sale_price_category) & gross_sf > 0 & land_sf > 0 & !is.na(tax_class_at_present) & !is.na(building_class_at_present)) %>% 
+  select(-apartment_number)
+
+
+```
+
+### Evaluation Metrics
+
+In order to evaluate the different algorithms, originally, three evaluation metrics were used. The different evaluation metrics were calculated on the test set.
+
+
+1. Root Mean Square Error (RMSE):
+$$RMSE = \sqrt{\frac{\sum \left ( r_{i,j} - \hat{r}_{i,j}\right )^{2}}{N}}$$
+2. Mean Average Error:
+$$MAE = \sum \left ( \left | r_{i,j} - \hat{r}_{i,j} \right | \right )$$
+3. Mean Square Error:
+$$MSE = \frac{1}{n}\sum\left (r_{i, j} - \hat{r}_{i,j}  \right )^{2}$$
+
+```{r}
+###RMSE function
+RMSE <- function(real_sale_price, predicted_price){
+  sqrt(mean((real_sale_price - predicted_price) ^ 2))
+}
+
+MSE <- function(real_sale_price, predicted_price){
+  mean((real_sale_price - predicted_price) ^ 2)
+}
+
+MAE <- function(real_sale_price, predicted_price){
+  mean(abs(real_sale_price - predicted_price))
+}
+```
+
+Since my original implementation included long computing time and resulted in unsatisfying results, I have reported the metrics just for the final algorithm. Since those metrics are used for comparing different algorithms, some sort of an abosolute metrics had to be thought of. I have decided to use the percentage of correct category prediction as a final metric and reporting it in addition to the other mertrics described. 
+
+# Results
+
+The random forest algorithm predicts quite accurately the sale price category. Applying it to the test set results in the following metrics:
+
+```{r}
+### creating a random foresst using ranger
+
+train_rf <- ranger(sale_price_category ~ ., data = train_set)
+
+predict_rf <- predict(train_rf, data = test_set)
+
+evaluation_results <- tibble(method = "Random Forest using ranger library", RMSE = RMSE(as.numeric(test_set$sale_price_category), as.numeric(predict_rf$predictions)),
+                                                                                 MSE = MSE(as.numeric(test_set$sale_price_category), as.numeric(predict_rf$predictions)),
+                                                                                 MAE = MAE(as.numeric(test_set$sale_price_category), as.numeric(predict_rf$predictions)))
+evaluation_results
+
+
+```
+
+The percentage metrics calculated is 
+```{r}
+### percentage of correct categories predicted
+test_set$predicted_price_category <- predict_rf$predictions
+
+#### checking if the the predicted is equal to the real
+test_set <- test_set %>% 
+  mutate(correct = ifelse(predicted_price_category == sale_price_category, TRUE, FALSE))
+
+
+### percentage metric of succesful prediction
+
+perc_met <- test_set %>% 
+  group_by(correct) %>% 
+  summarize(n = n())
+  
+
+perc_metric <- (perc_met$n[2]) / (perc_met$n[1] + perc_met$n[2])
+
+perc_metric
+```
+
+Thus, satisfying the scopes of this project and creating a comfortable tool for prediction. 
+
+
+# Conclusion
+
+In this project I created a price prediction algorithm for New-York City real-estate, using the kaggle database. The main disadvantage of my project is my weak laptop, not being able to process some possible algorithms, and therefore I did not compare my algorithm to any other algorithms but only reached what is, in my eyes, a satisfying result. In the future, and with a faster laptop I would try implemenging some other algorithms and also add some external variables, such as GDP, stock exchange prices, construction prices etc. 
+
